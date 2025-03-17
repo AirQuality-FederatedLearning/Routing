@@ -40,6 +40,8 @@ def load_road_network(place="Coimbatore, India", cache_dir="road_cache"):
 # 2) PSO + RRT* Config
 # --------------------------------------------------------------------
 class PSOConfig:
+    
+    
     def __init__(self):
         self.num_vehicles = 5          # Vehicles
         self.swarm_size = 20          # Number of particles
@@ -320,7 +322,7 @@ def main():
     st.title("PSO + RRT* Coverage Demo")
 
     with st.sidebar:
-        num_vehicles = st.slider("Number of Vehicles", 2, 10, 5)
+        num_vehicles = st.slider("Number of Vehicles", 2, 50, 50)
         swarm_size = st.slider("Swarm Size", 5, 50, 20)
         num_iterations = st.slider("Iterations", 10, 200, 50)
 
