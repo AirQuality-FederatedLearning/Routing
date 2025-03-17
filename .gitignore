@@ -1,0 +1,12 @@
+MyProject/*
+!MyProject/.gitignore
+__pycache__/
+major_road_cache/
+road_cache/
+solution_cache/
+
+*.json
+
+cache/*
+ga_cache/*
+*.geojson
