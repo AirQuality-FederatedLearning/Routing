@@ -1,10 +1,12 @@
 import os
-import streamlit as st
-import leafmap.kepler as leafmap
+import copy
+import random
+import math
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+
 import osmnx as ox
 import networkx as nx
-import random
-import numpy as np
 from shapely.geometry import LineString
 
 # Configure OSMnx caching and logging
@@ -18,18 +20,16 @@ def load_road_network(place="Coimbatore, India", cache_dir="road_cache"):
     os.makedirs(cache_dir, exist_ok=True)
     safe_place = place.replace(" ", "_").replace(",", "")
     cache_file = os.path.join(cache_dir, f"{safe_place}_network.graphml")
-    
-    # If you have a local "major roads" file:
+    # If you have a local "major roads" file, adjust this path:
     major_road_network = r"C:\Users\DELL\Documents\Amrita\4th year\ArcGis\major_road_cache\Coimbatore_India_major.graphml"
-    
     if os.path.exists(major_road_network):
-        st.write(f"Loading cached road network from {major_road_network}")
+        print(f"Loading cached road network from {major_road_network}")
         G = ox.load_graphml(major_road_network)
     elif os.path.exists(cache_file):
-        st.write(f"Loading cached road network from {cache_file}")
+        print(f"Loading cached road network from {cache_file}")
         G = ox.load_graphml(cache_file)
     else:
-        st.write(f"Downloading road network for {place}")
+        print(f"Downloading road network for {place}")
         G = ox.graph_from_place(place, network_type="drive", simplify=True)
         ox.save_graphml(G, cache_file)
     return G
@@ -38,13 +38,18 @@ def load_road_network(place="Coimbatore, India", cache_dir="road_cache"):
 # 2) GET POLICE STATION NODES (Fixed Starting Points)
 ###############################################################################
 def get_police_station_nodes(G, place="Coimbatore, India"):
+    """
+    1) Fetch police stations from OSM for the given place using the amenity tag.
+    2) For each police station, find the nearest node in the road network G.
+    3) Return a list of valid node IDs.
+    """
     try:
         gdf_police = ox.features_from_place(place, tags={"amenity": "police"})
     except Exception as e:
-        st.warning(f"Could not fetch police stations: {e}")
+        print(f"Could not fetch police stations: {e}")
         return []
     if gdf_police.empty:
-        st.info("No police stations found. Falling back to random nodes.")
+        print("No police stations found; using random nodes.")
         return []
     station_nodes = []
     for idx, row in gdf_police.iterrows():
@@ -57,59 +62,53 @@ def get_police_station_nodes(G, place="Coimbatore, India"):
     return list(set(station_nodes))
 
 ###############################################################################
-# 3) PSO CONFIGURATION
+# 3) PSO CONFIGURATION (Adjusted Scaling for Easy Comparison)
 ###############################################################################
 class PSOConfig:
     def __init__(self):
-        self.num_vehicles = 5          # Vehicles per solution
-        self.swarm_size = 20           # Number of particles
+        self.num_vehicles = 5          # Number of routes (vehicles) per solution
+        self.swarm_size = 30           # Number of particles
         self.num_iterations = 50
 
-        # PSO parameters (conceptual for route-based updates)
-        self.w = 0.5   # inertia (not used directly here)
+        # PSO parameters (conceptual in this discrete setting)
+        self.w = 0.5   # inertia (not heavily used)
         self.c1 = 1.5  # cognitive factor
         self.c2 = 1.5  # social factor
 
-        # Scaled reward/penalty factors (lower values for easy comparison)
-        self.coverage_factor = 1       # reward per meter of covered edge
-        self.overlap_penalty_factor = 2  # penalty per meter for edges used >3 times
+        # Scaled reward/penalty factors (lower for easier comparison)
+        self.coverage_factor = 1      # Reward per meter covered
+        self.overlap_penalty_factor = 1  # Penalty per meter overlapped
 
-        # Route-building constraints
-        self.max_route_distance = 15000  # maximum distance per route (in meters)
-        self.mutation_rate = 0.5         # increased chance for mutation to encourage exploration
+        self.max_route_distance = 15000  # Maximum allowed route length (meters)
+        self.mutation_rate = 0.3         # Increased mutation for exploration
 
 ###############################################################################
-# 4) PSO ROUTE OPTIMIZER (USING POLICE STATION STARTS)
+# 4) PSO ROUTE OPTIMIZER (Using Police Stations as Fixed Starting Points)
 ###############################################################################
 class PSORouteOptimizer:
     def __init__(self, G, config, police_nodes=None):
         self.G = G
         self.config = config
-        # Fixed starting points from police stations (if available)
-        self.starting_nodes = police_nodes if police_nodes and len(police_nodes) > 0 else None
-
-        # Build caches for adjacency and edge lengths
+        self.police_nodes = police_nodes if police_nodes else []
+        
+        # Build adjacency and edge-length caches
         self.adjacency_cache = {node: list(self.G.successors(node)) for node in self.G.nodes()}
         self.edge_length_cache = {}
         for u, v, data in self.G.edges(data=True):
             length = data.get('length', 0)
             self.edge_length_cache[(u, v)] = length
         self.all_edges = set(self.edge_length_cache.keys())
-
-        # Swarm structures
-        self.swarm = []               # current solutions (list of solutions)
-        self.personal_best = []       # best solution per particle
+        
+        # Swarm data structures
+        self.swarm = []               # List of solutions (each is a list of routes)
+        self.personal_best = []
         self.personal_best_fitness = []
         self.global_best = None
         self.global_best_fitness = -float('inf')
+        self.frames = []              # To store frames for animation
 
-    # Build a random route; if fixed starting node(s) exist, use them (round-robin)
-    def build_random_route(self, vehicle_index=0):
-        if self.starting_nodes:
-            start = self.starting_nodes[vehicle_index % len(self.starting_nodes)]
-        else:
-            nodes = list(self.G.nodes())
-            start = random.choice(nodes)
+    def build_route_from_start(self, start):
+        """Build a random route that always begins with the fixed start node."""
         route = [start]
         dist_so_far = 0.0
         current = start
@@ -126,15 +125,20 @@ class PSORouteOptimizer:
             current = next_node
         return route
 
-    # Build a complete solution: one route per vehicle
     def build_solution(self):
+        """A solution consists of one route per vehicle. Each route starts at a fixed police station if available."""
         solution = []
         for i in range(self.config.num_vehicles):
-            solution.append(self.build_random_route(i))
+            if self.police_nodes:
+                start = random.choice(self.police_nodes)
+            else:
+                start = random.choice(list(self.G.nodes()))
+            route = self.build_route_from_start(start)
+            solution.append(route)
         return solution
 
-    # Fitness: reward for coverage minus penalty for overlap
     def fitness(self, solution):
+        """Compute fitness as coverage reward minus overlap penalty."""
         covered_edges = set()
         edge_usage = {}
         for route in solution:
@@ -146,13 +150,12 @@ class PSORouteOptimizer:
                     edge_usage[(v, u)] = edge_usage.get((v, u), 0) + 1
                     covered_edges.add((v, u))
         coverage_reward = sum(self.config.coverage_factor * self.edge_length_cache[e] for e in covered_edges)
-        overlap_penalty = 0.0
+        overlap_penalty = 0
         for e, count in edge_usage.items():
             if count > 3:
                 overlap_penalty += self.config.overlap_penalty_factor * (count - 3) * self.edge_length_cache[e]
         return coverage_reward - overlap_penalty
 
-    # Initialize the swarm
     def initialize_swarm(self):
         self.swarm = []
         self.personal_best = []
@@ -166,35 +169,43 @@ class PSORouteOptimizer:
             self.personal_best.append(sol)
             self.personal_best_fitness.append(fit)
             if fit > self.global_best_fitness:
-                self.global_best_fitness = fit
                 self.global_best = sol
+                self.global_best_fitness = fit
 
-    # Velocity update: for each vehicle route, choose from current, personal best, or global best
     def velocity_update(self, i, current_sol):
+        """
+        For each vehicle route, choose from current, personal best, or global best.
+        Ensure the starting node (police station) remains unchanged.
+        """
         pbest = self.personal_best[i]
         gbest = self.global_best
         new_sol = []
         for v in range(self.config.num_vehicles):
+            start = current_sol[v][0]  # fixed starting point
             r = random.random()
             if r < 0.34:
-                new_sol.append(current_sol[v])
+                new_route = current_sol[v]
             elif r < 0.67:
-                new_sol.append(pbest[v])
+                new_route = pbest[v]
             else:
-                new_sol.append(gbest[v])
+                new_route = gbest[v]
+            new_route[0] = start  # enforce fixed starting point
+            new_sol.append(new_route)
         return new_sol
 
-    # Mutation: randomly modify route segments
     def mutate(self, solution):
+        """With a probability, mutate a segment of each route while preserving the starting node."""
         new_sol = []
         for route in solution:
+            start = route[0]
             if random.random() < self.config.mutation_rate and len(route) > 4:
-                i = random.randint(0, len(route) - 2)
+                i = random.randint(1, len(route) - 2)  # start index 1 onward
                 j = random.randint(i + 1, len(route) - 1)
                 sub_start = route[i]
                 sub_end = route[j]
                 sub_route = self._build_subroute(sub_start, sub_end)
-                mutated_route = route[:i+1] + sub_route[1:-1] + route[j:]
+                mutated_route = route[:i] + sub_route[1:-1] + route[j:]
+                mutated_route[0] = start
                 new_sol.append(mutated_route)
             else:
                 new_sol.append(route)
@@ -218,8 +229,8 @@ class PSORouteOptimizer:
             route.append(end_node)
         return route
 
-    # Main PSO loop
     def run(self):
+        """Main PSO loop that updates swarm, personal bests, and global best, storing frames for animation."""
         self.initialize_swarm()
         for iteration in range(self.config.num_iterations):
             for i in range(self.config.swarm_size):
@@ -235,111 +246,89 @@ class PSORouteOptimizer:
                         if new_fit > self.global_best_fitness:
                             self.global_best = mutated
                             self.global_best_fitness = new_fit
-        return self.global_best, self.global_best_fitness
+            self.frames.append((iteration, copy.deepcopy(self.global_best), self.global_best_fitness))
+        return self.global_best, self.global_best_fitness, self.frames
 
 ###############################################################################
-# 5) CONVERT SOLUTION TO GEOJSON FOR VISUALIZATION (WITH BACKGROUND MAP)
+# CONVERT SOLUTION TO LINES FOR PLOTTING
 ###############################################################################
-def solution_to_geojson(G, solution):
-    colors = [
-        "#e6194B", "#3cb44b", "#ffe119", "#4363d8", "#f58231",
-        "#911eb4", "#46f0f0", "#f032e6", "#bcf60c", "#fabebe"
-    ]
-    features = []
-    for vid, route in enumerate(solution):
-        if len(route) < 2:
+def solution_to_lines(G, solution):
+    segments = []
+    for route in solution:
+        seg = []
+        for node in route:
+            x = G.nodes[node]['x']
+            y = G.nodes[node]['y']
+            seg.append((x, y))
+        segments.append(seg)
+    return segments
+
+###############################################################################
+# GET BACKGROUND BOUNDARY COORDINATES
+###############################################################################
+def get_boundary_coords(place="Coimbatore, India"):
+    try:
+        boundary_gdf = ox.geocode_to_gdf(place)
+        geom = boundary_gdf.geometry.iloc[0]
+        if geom.geom_type == "Polygon":
+            return list(geom.exterior.coords)
+        elif geom.geom_type == "MultiPolygon":
+            largest = max(geom.geoms, key=lambda p: p.area)
+            return list(largest.exterior.coords)
+    except Exception as e:
+        print(f"Error fetching boundary: {e}")
+    return None
+
+###############################################################################
+# UPDATE FUNCTION FOR MATPLOTLIB ANIMATION
+###############################################################################
+def update(frame, G, ax, boundary_coords):
+    iteration, solution, fitness = frame
+    ax.clear()
+    ax.set_title(f"Iteration: {iteration} | Fitness: {fitness:.2f}")
+    # Plot background boundary
+    if boundary_coords:
+        bx, by = zip(*boundary_coords)
+        ax.plot(bx, by, color="gray", linewidth=1, linestyle="--")
+    segments = solution_to_lines(G, solution)
+    colors = ["red", "blue", "green", "orange", "purple", "brown", "pink", "olive", "cyan", "magenta"]
+    for i, seg in enumerate(segments):
+        if len(seg) < 2:
             continue
-        lines = []
-        for u, v in zip(route[:-1], route[1:]):
-            if (u, v) in G.edges():
-                edge_data = G.get_edge_data(u, v)
-                if edge_data is not None:
-                    edge_dict = edge_data[0] if 0 in edge_data else list(edge_data.values())[0]
-                    geom = edge_dict.get('geometry')
-                    if geom is None:
-                        geom = LineString([
-                            (G.nodes[u]['x'], G.nodes[u]['y']),
-                            (G.nodes[v]['x'], G.nodes[v]['y'])
-                        ])
-                    lines.append(geom)
-            elif (v, u) in G.edges():
-                edge_data = G.get_edge_data(v, u)
-                if edge_data is not None:
-                    edge_dict = edge_data[0] if 0 in edge_data else list(edge_data.values())[0]
-                    geom = edge_dict.get('geometry')
-                    if geom is None:
-                        geom = LineString([
-                            (G.nodes[v]['x'], G.nodes[v]['y']),
-                            (G.nodes[u]['x'], G.nodes[u]['y'])
-                        ])
-                    lines.append(geom)
-        if lines:
-            color = colors[vid % len(colors)]
-            feature = {
-                "type": "Feature",
-                "properties": {
-                    "vehicle": vid + 1,
-                    "stroke": color,
-                    "stroke-width": 3,
-                    "stroke-opacity": 0.8
-                },
-                "geometry": {
-                    "type": "MultiLineString",
-                    "coordinates": [list(line.coords) for line in lines]
-                }
-            }
-            features.append(feature)
-    return {"type": "FeatureCollection", "features": features}
+        xs, ys = zip(*seg)
+        ax.plot(xs, ys, color=colors[i % len(colors)], linewidth=2, marker='o', label=f'Route {i+1}')
+    ax.legend(loc="upper right")
+    ax.set_aspect('equal')
+    # Set axis limits based on graph nodes
+    all_coords = [(G.nodes[n]['x'], G.nodes[n]['y']) for n in G.nodes()]
+    xs_all, ys_all = zip(*all_coords)
+    margin = 0.001
+    ax.set_xlim(min(xs_all)-margin, max(xs_all)+margin)
+    ax.set_ylim(min(ys_all)-margin, max(ys_all)+margin)
 
 ###############################################################################
-# 6) STREAMLIT MAIN APP
+# MAIN FUNCTION (ANIMATION)
 ###############################################################################
 def main():
-    st.set_page_config(layout="wide")
-    st.title("Multi-Vehicle Coverage (PSO with Fixed Police Station Starts)")
-
-    with st.sidebar:
-        num_vehicles = st.slider("Number of Vehicles", 2, 50, 5)
-        swarm_size = st.slider("Swarm Size", 5, 50, 20)
-        num_iterations = st.slider("Iterations", 10, 200, 50)
-        coverage_factor = st.slider("Coverage Factor", 1, 10, 1, step=1,
-                                    help="Reward factor per meter for each covered edge")
-        overlap_penalty_factor = st.slider("Overlap Penalty Factor", 1, 10, 2, step=1,
-                                           help="Penalty factor per meter for edges used >3 times")
-        mutation_rate = st.slider("Mutation Rate", 0.0, 1.0, 0.5, step=0.1)
-        run_btn = st.button("Run PSO Optimization")
-
-    if run_btn:
-        config = PSOConfig()
-        config.num_vehicles = num_vehicles
-        config.swarm_size = swarm_size
-        config.num_iterations = num_iterations
-        config.coverage_factor = coverage_factor
-        config.overlap_penalty_factor = overlap_penalty_factor
-        config.mutation_rate = mutation_rate
-
-        with st.spinner("Loading road network..."):
-            G = load_road_network("Coimbatore, India")
-        with st.spinner("Fetching police station nodes..."):
-            police_nodes = get_police_station_nodes(G, "Coimbatore, India")
-            st.write(f"Found {len(police_nodes)} police station node(s).")
-        # Use police station nodes as fixed starting points.
-        optimizer = PSORouteOptimizer(G, config, police_nodes)
-        with st.spinner("Running PSO Optimization..."):
-            best_solution, best_fit = optimizer.run()
-
-        st.success(f"Optimization complete. Best Fitness: {best_fit:.2f}")
-        geojson_data = solution_to_geojson(G, best_solution)
-
-        # Create a map with background: show city boundary and overlay the PSO routes.
-        m = leafmap.Map(center=[11.0168, 76.9558], zoom=12)
-        boundary_gdf = ox.geocode_to_gdf("Coimbatore, India")
-        m.add_gdf(boundary_gdf, layer_name="Coimbatore Boundary",
-                  style={"color": "#FF0000", "fillOpacity": 0.1})
-        m.add_geojson(geojson_data, layer_name="PSO Routes")
-
-        st.write("Fixed starting points (police stations) were used for each vehicle and remain unchanged.")
-        m.to_streamlit()
+    print("Loading road network...")
+    G = load_road_network("Coimbatore, India")
+    print("Fetching police station nodes...")
+    police_nodes = get_police_station_nodes(G, "Coimbatore, India")
+    print(f"Found {len(police_nodes)} police station nodes.")
+    
+    config = PSOConfig()
+    optimizer = PSORouteOptimizer(G, config, police_nodes)
+    best_solution, best_fit, frames = optimizer.run()
+    print(f"Optimization complete. Best Fitness: {best_fit:.2f}")
+    
+    boundary_coords = get_boundary_coords("Coimbatore, India")
+    fig, ax = plt.subplots(figsize=(8,8))
+    anim = FuncAnimation(fig, update, frames=frames, fargs=(G, ax, boundary_coords), interval=500)
+    plt.show()
+    # Optionally, save the animation:
+    # anim.save("pso_animation.mp4", writer="ffmpeg")
+    # or
+    anim.save("pso_animation.gif", writer="imagemagick")
 
 if __name__ == "__main__":
     main()
