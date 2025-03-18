@@ -326,7 +326,7 @@ def main():
     anim = FuncAnimation(fig, update, frames=frames, fargs=(G, ax, boundary_coords), interval=500)
     plt.show()
     # Optionally, save the animation:
-    # anim.save("pso_animation.mp4", writer="ffmpeg")
+    anim.save("pso_animation.mp4", writer="ffmpeg")
     # or
     anim.save("pso_animation.gif", writer="imagemagick")
 
