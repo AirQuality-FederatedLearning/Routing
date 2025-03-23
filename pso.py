@@ -6,9 +6,13 @@ import networkx as nx
 import random
 import numpy as np
 from shapely.geometry import LineString
+import time
 
 ox.settings.use_cache = True
 ox.settings.log_console = True
+
+random.seed(42)
+np.random.seed(42)
 
 ###############################################################################
 # 1) LOAD / CACHING THE ROAD NETWORK
@@ -23,7 +27,7 @@ def load_road_network(place="Coimbatore, India", cache_dir="road_cache"):
     cache_file = os.path.join(cache_dir, f"{safe_place}_network.graphml")
 
     # If you have a local "major roads" .graphml:
-    major_road_network = r"C:\Users\DELL\Documents\Amrita\4th year\ArcGis\major_road_cache\Coimbatore_India_major.graphml"
+    major_road_network = r"C:\Users\DELL\Documents\Amrita\4th year\ArcGis\major_road_cache\\road_cache\Coimbatore_India_highways_primary.graphml"
 
     if os.path.exists(major_road_network):
         st.write(f"Loading cached road network from {major_road_network}")
@@ -39,7 +43,37 @@ def load_road_network(place="Coimbatore, India", cache_dir="road_cache"):
     return G
 
 ###############################################################################
-# 2) PSO CONFIG
+# 2) FETCH POLICE STATIONS & NEAREST ROAD NETWORK NODES
+###############################################################################
+def get_police_station_nodes(G, place="Coimbatore, India"):
+    """
+    1) Fetch police stations from OSM for the given place using amenities tag.
+    2) For each police station geometry, find the nearest node in the road network G.
+    3) Return a list of valid node IDs corresponding to these stations.
+       If none found, returns an empty list.
+    """
+    try:
+        gdf_police = ox.features_from_place(place, tags={"amenity": "police"})
+    except Exception as e:
+        st.warning(f"Could not fetch police stations: {e}")
+        return []
+
+    if gdf_police.empty:
+        st.info("No police stations found with the given tag. Falling back to random start nodes.")
+        return []
+
+    station_nodes = []
+    for idx, row in gdf_police.iterrows():
+        geom = row.geometry
+        if geom is None:
+            continue
+        point = geom.centroid if geom.geom_type != 'Point' else geom
+        node_id = ox.distance.nearest_nodes(G, point.x, point.y)
+        station_nodes.append(node_id)
+    return list(set(station_nodes))
+
+###############################################################################
+# 3) PSO CONFIG
 ###############################################################################
 class PSOConfig:
     def __init__(self):
@@ -63,12 +97,13 @@ class PSOConfig:
         self.mutation_rate = 0.2         # chance to mutate a route
 
 ###############################################################################
-# 3) PSO OPTIMIZER (ROUTE-BASED)
+# 4) PSO OPTIMIZER (ROUTE-BASED)
 ###############################################################################
 class PSORouteOptimizer:
-    def __init__(self, G, config):
+    def __init__(self, G, config, start_nodes=None):
         self.G = G
         self.config = config
+        self.start_nodes = start_nodes
 
         # Build adjacency + edge length caches
         self.adjacency_cache = {}
@@ -101,7 +136,7 @@ class PSORouteOptimizer:
         nodes_list = list(self.G.nodes())
         if not nodes_list:
             return []
-        current = random.choice(nodes_list)
+        current = random.choice(self.start_nodes) if self.start_nodes else random.choice(nodes_list)
         route = [current]
         dist_so_far = 0.0
 
@@ -286,7 +321,7 @@ class PSORouteOptimizer:
         return self.global_best, self.global_best_fitness
 
 ###############################################################################
-# 4) CONVERT SOLUTION TO GEOJSON FOR VISUALIZATION
+# 5) CONVERT SOLUTION TO GEOJSON FOR VISUALIZATION
 ###############################################################################
 def solution_to_geojson(G, solution):
     """
@@ -350,14 +385,14 @@ def solution_to_geojson(G, solution):
     return {"type": "FeatureCollection", "features": features}
 
 ###############################################################################
-# 5) STREAMLIT MAIN APP
+# 6) STREAMLIT MAIN APP
 ###############################################################################
 def main():
     st.set_page_config(layout="wide")
     st.title("Multi-Vehicle Coverage (PSO - No RRT)")
 
     with st.sidebar:
-        num_vehicles = st.slider("Number of Vehicles", 2, 10, 5)
+        num_vehicles = st.slider("Number of Vehicles", 2, 50, 50)
         swarm_size = st.slider("Swarm Size", 5, 50, 20)
         num_iterations = st.slider("Iterations", 10, 200, 50)
 
@@ -368,6 +403,7 @@ def main():
         run_btn = st.button("Run PSO")
 
     if run_btn:
+        start_time = time.time()
         # Build config
         config = PSOConfig()
         config.num_vehicles = num_vehicles
@@ -380,9 +416,13 @@ def main():
         with st.spinner("Loading road network..."):
             G = load_road_network("Coimbatore, India")
 
+        # Fetch police stations and get their nodes
+        with st.spinner("Fetching police station nodes..."):
+            police_station_nodes = get_police_station_nodes(G, place="Coimbatore, India")
+
         # Run PSO
         with st.spinner("Running PSO..."):
-            optimizer = PSORouteOptimizer(G, config)
+            optimizer = PSORouteOptimizer(G, config, start_nodes=police_station_nodes)
             best_solution, best_fit = optimizer.run()
 
         # Convert best solution to GeoJSON and show on map
@@ -397,6 +437,8 @@ def main():
         st.success(f"Best Fitness: {best_fit:.2f}")
         m.to_streamlit()
 
+        end_time = time.time()
+        st.write(f"Time taken: {end_time - start_time:.2f} seconds")
 
 if __name__ == "__main__":
     main()
