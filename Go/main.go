@@ -1,348 +1,536 @@
 package main
-
 import (
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
-	"log"
 	"math"
 	"math/rand"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
-	"github.com/awalterschulze/gographviz"
-	"github.com/paulmach/osm/geojson"
-	"github.com/paulmach/orb"
+	"github.com/tealeg/xlsx"
 )
 
-const (
-	MinLat = 10.90
-	MaxLat = 11.13
-	MinLon = 76.86
-	MaxLon = 77.04
-)
+// GraphML structures
+type GraphML struct {
+	XMLName xml.Name `xml:"graphml"`
+	Keys    []Key    `xml:"key"`
+	Graph   Graph    `xml:"graph"`
+}
 
-type Node struct {
-	ID  string
-	Lat float64
-	Lon float64
+type Key struct {
+	ID    string `xml:"id,attr"`
+	For   string `xml:"for,attr"`
+	Attr  string `xml:"attr.name,attr"`
+	Type  string `xml:"attr.type,attr"`
 }
 
 type Graph struct {
-	Nodes map[string]*Node
-	Edges map[string][]string
+	XMLName xml.Name `xml:"graph"`
+	Edges   []Edge   `xml:"edge"`
+	Nodes   []Node   `xml:"node"`
 }
 
-type PoliceStation struct {
+type Node struct {
+	ID   string `xml:"id,attr"`
+	Data []Data `xml:"data"`
+}
+
+type Edge struct {
+	Source string `xml:"source,attr"`
+	Target string `xml:"target,attr"`
+	Data   []Data `xml:"data"`
+}
+
+type Data struct {
+	Key   string `xml:"key,attr"`
+	Value string `xml:",chardata"`
+}
+
+// Graph representation
+type GraphNode struct {
 	ID       string
-	Lat, Lon float64
+	X, Y     float64
+	OutEdges []string
 }
 
-type Config struct {
+type GraphEdge struct {
+	From, To string
+	Length   float64
+}
+
+type RoadGraph struct {
+	Nodes map[string]*GraphNode
+	Edges map[string]map[string]*GraphEdge
+}
+
+// PSO structures
+type Route []string
+type Solution []Route
+
+type Particle struct {
+	Position Solution
+	BestPos  Solution
+	BestFit  float64
+}
+
+type PSO struct {
+	Graph         *RoadGraph
+	Config        PSOConfig
+	Swarm         []Particle
+	GlobalBest    Solution
+	GlobalBestFit float64
+	PoliceNodes   []string
+}
+
+type PSOConfig struct {
 	NumVehicles      int
-	NumIterations    int
-	MaxRouteDistance float64
-	MaxRouteSteps    int
-	Alpha            float64
-	Beta             float64
-	Evaporation      float64
-	Q                float64
+	SwarmSize        int
+	Iterations       int
+	W, C1, C2       float64
 	CoverageFactor   float64
-	PenaltyFactor    float64
-	RRTExpansions    int
+	OverlapPenalty   float64
+	MaxRouteDistance float64
+	MutationRate     float64
 }
 
-type RouteSolution struct {
-	Vehicles [][]string
-	Fitness  float64
-	Graph    *Graph
-	Config   *Config
+// GeoJSON structures
+type GeoJSONFeature struct {
+	Type       string                 `json:"type"`
+	Geometry   GeoJSONGeometry        `json:"geometry"`
+	Properties map[string]interface{} `json:"properties"`
+}
+
+type GeoJSONGeometry struct {
+	Type        string        `json:"type"`
+	Coordinates [][][]float64 `json:"coordinates"`
+}
+
+type GeoJSON struct {
+	Type     string           `json:"type"`
+	Features []GeoJSONFeature `json:"features"`
 }
 
 func main() {
 	rand.Seed(time.Now().UnixNano())
 
-	// 1) Load GraphML data
-	graph, err := parseGraphML("path_to_your_graphml_file.graphml")
+	// Load road network
+	graph, err := loadGraphML("Coimbatore_India_major.graphml")
 	if err != nil {
-		log.Fatalf("Error parsing GraphML: %v", err)
+		panic(err)
 	}
 
-	// 2) Define Police Stations (In a real case, load them from a file)
-	var stations []PoliceStation
-	stations = append(stations, PoliceStation{ID: "Station1", Lat: 10.994, Lon: 77.027})
-	stations = append(stations, PoliceStation{ID: "Station2", Lat: 11.010, Lon: 76.990})
+	// Load police stations from Excel
+	policeNodes, err := getPoliceNodesFromExcel("C:\\Users\\DELL\\Documents\\Amrita\\4th year\\ArcGis\\coimbatore_police.xlsx", graph)
+	if err != nil {
+		panic(err)
+	}
 
-	// 3) Configuration for ACO and RRT*
-	cfg := &Config{
-		NumVehicles:      5,
-		NumIterations:    50,
-		MaxRouteDistance: 15000,
-		MaxRouteSteps:    20,
-		Alpha:            1.0,
-		Beta:             2.0,
-		Evaporation:      0.1,
-		Q:                100,
+	config := PSOConfig{
+		NumVehicles:      50,
+		SwarmSize:        20,
+		Iterations:       50,
+		W:                0.5,
+		C1:               1.5,
+		C2:               1.5,
 		CoverageFactor:   5000,
-		PenaltyFactor:    10000,
-		RRTExpansions:    20,
+		OverlapPenalty:   10000,
+		MaxRouteDistance: 15000,
+		MutationRate:     0.2,
 	}
 
-	// 4) Generate initial seeds using RRT*
-	fmt.Println("Generating RRT* seeds...")
-	seeds := buildRRTStarSeeds(graph, cfg, stations)
+	pso := NewPSO(graph, config, policeNodes)
+	bestSolution, bestFit := pso.Run()
 
-	// 5) Run coverage-based ACO optimization
-	fmt.Println("Running coverage-based ACO...")
-	best := runACO(graph, cfg, seeds)
+	fmt.Printf("Best fitness: %.2f\n", bestFit)
 
-	// 6) Save result to GeoJSON
-	saveGeoJSON(best, "routes.geojson")
-	fmt.Printf("Done. Best fitness: %.2f\n", best.Fitness)
+	geojson := solutionToGeoJSON(pso.Graph, bestSolution)
+	file, _ := json.MarshalIndent(geojson, "", "  ")
+	_ = os.WriteFile("routes.geojson", file, 0644)
 }
 
-// 1) Parse GraphML file and create Graph structure
-func parseGraphML(filename string) (*Graph, error) {
-	file, err := os.Open(filename)
+func loadGraphML(filename string) (*RoadGraph, error) {
+	file, err := os.ReadFile(filename)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open file: %v", err)
-	}
-	defer file.Close()
-
-	graphAst, err := gographviz.ParseFile(file)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse GraphML: %v", err)
+		return nil, err
 	}
 
-	graph := gographviz.NewGraph()
-	if err := gographvizAst.Read(graphAst); err != nil {
-		return nil, fmt.Errorf("failed to read graph AST: %v", err)
+	var graphml GraphML
+	if err := xml.Unmarshal(file, &graphml); err != nil {
+		return nil, err
 	}
 
-	g := &Graph{
-		Nodes: make(map[string]*Node),
-		Edges: make(map[string][]string),
+	roadGraph := &RoadGraph{
+		Nodes: make(map[string]*GraphNode),
+		Edges: make(map[string]map[string]*GraphEdge),
 	}
 
-	for nodeID, _ := range graph.Nodes {
-		g.Nodes[nodeID] = &Node{ID: nodeID}
-	}
-
-	for _, edge := range graph.Edges {
-		source := edge.Src
-		target := edge.Dst
-		if _, exists := g.Edges[source]; !exists {
-			g.Edges[source] = []string{}
+	// Find coordinate keys
+	var xKey, yKey, lengthKey string
+	for _, key := range graphml.Keys {
+		switch key.Attr {
+		case "x":
+			xKey = key.ID
+		case "y":
+			yKey = key.ID
+		case "length":
+			lengthKey = key.ID
 		}
-		g.Edges[source] = append(g.Edges[source], target)
 	}
 
-	return g, nil
-}
-
-// 2) Build RRT* seeds
-func buildRRTStarSeeds(g *Graph, cfg *Config, stations []PoliceStation) []*RouteSolution {
-	seeds := make([]*RouteSolution, 0)
-	for i := 0; i < cfg.NumVehicles; i++ {
-		sol := &RouteSolution{
-			Graph:  g,
-			Config: cfg,
-			Vehicles: [][]string{
-				// Route for policeman
-			},
-		}
-		var start string
-		if len(stations) > i {
-			// Use the station's nearest node
-			start = findNearestNode(g, stations[i].Lat, stations[i].Lon)
-		} else {
-			// Fallback random
-			start = randomNodeID(g)
-		}
-		rte := rrtStarExpand(g, cfg, start)
-		sol.Vehicles = [][]string{rte}
-		sol.Evaluate()
-		seeds = append(seeds, sol)
-	}
-	return seeds
-}
-
-// 3) Implement RRT* Expansion
-func rrtStarExpand(g *Graph, cfg *Config, start string) []string {
-	distTo := make(map[string]float64)
-	parent := make(map[string]string)
-
-	for id := range g.Nodes {
-		distTo[id] = math.MaxFloat64
-	}
-	distTo[start] = 0
-
-	for i := 0; i < cfg.RRTExpansions; i++ {
-		rnd := randomNodeID(g)
-		bestNode := findNearestNode(distTo)
-		path := BFSPath(g, bestNode, rnd)
-		subDist := measureDistance(g, path)
-
-		if distTo[bestNode]+subDist < distTo[rnd] && distTo[bestNode]+subDist < cfg.MaxRouteDistance {
-			curDist := distTo[bestNode]
-			for i := 1; i < len(path); i++ {
-				nid := path[i]
-				stepD := haversine(g.Nodes[path[i-1]].Lat, g.Nodes[path[i-1]].Lon, g.Nodes[nid].Lat, g.Nodes[nid].Lon)
-				newDist := curDist + stepD
-				if newDist < distTo[nid] {
-					distTo[nid] = newDist
-					parent[nid] = path[i-1]
-				}
-				curDist = newDist
-				if curDist > cfg.MaxRouteDistance {
-					break
-				}
+	// Process nodes
+	for _, node := range graphml.Graph.Nodes {
+		var x, y float64
+		for _, data := range node.Data {
+			switch data.Key {
+			case xKey:
+				x, _ = strconv.ParseFloat(data.Value, 64)
+			case yKey:
+				y, _ = strconv.ParseFloat(data.Value, 64)
 			}
 		}
-	}
-
-	var farNode string
-	var bestDist float64
-	for nd, d := range distTo {
-		if d > bestDist && d < cfg.MaxRouteDistance {
-			bestDist = d
-			farNode = nd
+		roadGraph.Nodes[node.ID] = &GraphNode{
+			ID:       node.ID,
+			X:        x,
+			Y:        y,
+			OutEdges: []string{},
 		}
 	}
 
-	var rev []string
-	cur := farNode
-	for cur != "" && cur != start {
-		rev = append(rev, cur)
-		cur = parent[cur]
-	}
-	rev = append(rev, start)
-	for i, j := 0, len(rev)-1; i < j; i, j = i+1, j-1 {
-		rev[i], rev[j] = rev[j], rev[i]
-	}
-	return rev
-}
-
-// 4) ACO Optimization
-func runACO(g *Graph, cfg *Config, seeds []*RouteSolution) *RouteSolution {
-	pher := make(map[string]float64)
-	for id := range g.Nodes {
-		for _, neigh := range g.Edges[id] {
-			pher[id+"-"+neigh] = 1.0
-		}
-	}
-
-	for _, s := range seeds {
-		for _, route := range s.Vehicles {
-			for i := 0; i < len(route)-1; i++ {
-				pher[route[i]+"-"+route[i+1]] += 2.0
+	// Process edges
+	for _, edge := range graphml.Graph.Edges {
+		var length float64
+		for _, data := range edge.Data {
+			if data.Key == lengthKey {
+				length, _ = strconv.ParseFloat(data.Value, 64)
 			}
 		}
-	}
 
-	best := &RouteSolution{
-		Fitness: -math.MaxFloat64,
-		Graph:   g,
-		Config:  cfg,
-	}
-
-	for iter := 0; iter < cfg.NumIterations; iter++ {
-		cur := &RouteSolution{
-			Graph:  g,
-			Config: cfg,
+		if _, ok := roadGraph.Edges[edge.Source]; !ok {
+			roadGraph.Edges[edge.Source] = make(map[string]*GraphEdge)
 		}
-		cur.buildColonySolution(pher)
-		cur.Evaluate()
-		if cur.Fitness > best.Fitness {
-			best = cur
+		roadGraph.Edges[edge.Source][edge.Target] = &GraphEdge{
+			From:   edge.Source,
+			To:     edge.Target,
+			Length: length,
 		}
-		evaporate(pher, cfg.Evaporation)
-		deposit(cur, pher, cfg)
+		roadGraph.Nodes[edge.Source].OutEdges = append(
+			roadGraph.Nodes[edge.Source].OutEdges,
+			edge.Target,
+		)
 	}
-	return best
+
+	return roadGraph, nil
 }
 
-// 5) Fitness Calculation
-func (sol *RouteSolution) Evaluate() {
-	// Calculate fitness based on coverage and penalties
-	// Add implementation as per your ACO algorithm
+func getPoliceNodesFromExcel(filename string, graph *RoadGraph) ([]string, error) {
+	xlFile, err := xlsx.OpenFile(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	var policeNodes []string
+	sheet := xlFile.Sheets[0]
+
+	for _, row := range sheet.Rows[1:] { // Skip header
+		if len(row.Cells) == 0 {
+			continue
+		}
+
+		geomCell := row.Cells[0]
+		pointStr := strings.TrimPrefix(geomCell.String(), "POINT (")
+		pointStr = strings.TrimSuffix(pointStr, ")")
+		coords := strings.Split(pointStr, " ")
+		if len(coords) != 2 {
+			continue
+		}
+
+		lon, _ := strconv.ParseFloat(coords[0], 64)
+		lat, _ := strconv.ParseFloat(coords[1], 64)
+
+		// Find nearest node
+		nearestID := ""
+		minDist := math.MaxFloat64
+		for _, node := range graph.Nodes {
+			dist := haversine(lon, lat, node.X, node.Y)
+			if dist < minDist {
+				minDist = dist
+				nearestID = node.ID
+			}
+		}
+
+		if nearestID != "" {
+			policeNodes = append(policeNodes, nearestID)
+		}
+	}
+
+	return policeNodes, nil
 }
 
-// 6) Helper functions: `findNearestNode`, `randomNodeID`, `BFSPath`, etc.
-func findNearestNode(g *Graph, lat, lon float64) string {
-	// Find the nearest node to given lat, lon
-	// Implement your own logic
-	return ""
-}
-
-func randomNodeID(g *Graph) string {
-	// Pick a random node from the graph
-	return ""
-}
-
-func BFSPath(g *Graph, src, dst string) []string {
-	// Perform BFS to find path from src to dst
-	return []string{}
-}
-
-func measureDistance(g *Graph, path []string) float64 {
-	// Measure the distance of the given path
-	return 0.0
-}
-
-// Haversine formula for distance calculation
-func haversine(lat1, lon1, lat2, lon2 float64) float64 {
-	const R = 6371e3 // Earth radius in meters
+func haversine(lon1, lat1, lon2, lat2 float64) float64 {
+	const R = 6371000 // Earth radius in meters
 	φ1 := lat1 * math.Pi / 180
 	φ2 := lat2 * math.Pi / 180
 	Δφ := (lat2 - lat1) * math.Pi / 180
 	Δλ := (lon2 - lon1) * math.Pi / 180
 
 	a := math.Sin(Δφ/2)*math.Sin(Δφ/2) +
-		math.Cos(φ1)*math.Cos(φ2)*math.Sin(Δλ/2)*math.Sin(Δλ/2)
+		math.Cos(φ1)*math.Cos(φ2)*
+			math.Sin(Δλ/2)*math.Sin(Δλ/2)
 	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
 
 	return R * c
 }
 
-// Save solution to GeoJSON
-func saveGeoJSON(sol *RouteSolution, filename string) {
-	ctx := geojson.NewContext()
-	var features []*geojson.Feature
-	colors := []string{"#FF0000", "#00FF00", "#0000FF", "#FFFF00", "#FF00FF"}
+func NewPSO(graph *RoadGraph, config PSOConfig, policeNodes []string) *PSO {
+	return &PSO{
+		Graph:       graph,
+		Config:      config,
+		PoliceNodes: policeNodes,
+	}
+}
 
-	for vid, route := range sol.Vehicles {
+func (pso *PSO) Run() (Solution, float64) {
+	pso.initializeSwarm()
+
+	for iter := 0; iter < pso.Config.Iterations; iter++ {
+		for i := range pso.Swarm {
+			newPos := pso.velocityUpdate(pso.Swarm[i].Position)
+			mutated := pso.mutate(newPos)
+			newFit := pso.fitness(mutated)
+
+			if newFit > pso.Swarm[i].BestFit {
+				pso.Swarm[i].Position = mutated
+				pso.Swarm[i].BestPos = mutated
+				pso.Swarm[i].BestFit = newFit
+
+				if newFit > pso.GlobalBestFit {
+					pso.GlobalBest = mutated
+					pso.GlobalBestFit = newFit
+				}
+			}
+		}
+		fmt.Printf("Iteration %d, Best Fit: %.2f\n", iter, pso.GlobalBestFit)
+	}
+
+	return pso.GlobalBest, pso.GlobalBestFit
+}
+
+func (pso *PSO) initializeSwarm() {
+	pso.Swarm = make([]Particle, pso.Config.SwarmSize)
+	pso.GlobalBestFit = -math.MaxFloat64
+
+	for i := range pso.Swarm {
+		sol := pso.generateSolution()
+		fit := pso.fitness(sol)
+		pso.Swarm[i] = Particle{
+			Position: sol,
+			BestPos:  sol,
+			BestFit:  fit,
+		}
+		if fit > pso.GlobalBestFit {
+			pso.GlobalBest = sol
+			pso.GlobalBestFit = fit
+		}
+	}
+}
+
+func (pso *PSO) generateSolution() Solution {
+	sol := make(Solution, pso.Config.NumVehicles)
+	for i := range sol {
+		sol[i] = pso.generateRoute()
+	}
+	return sol
+}
+
+func (pso *PSO) generateRoute() Route {
+	if len(pso.PoliceNodes) == 0 {
+		return nil
+	}
+
+	current := pso.PoliceNodes[rand.Intn(len(pso.PoliceNodes))]
+	route := Route{current}
+	distance := 0.0
+
+	for {
+		neighbors := pso.Graph.Nodes[current].OutEdges
+		if len(neighbors) == 0 {
+			break
+		}
+
+		next := neighbors[rand.Intn(len(neighbors))]
+		edge, exists := pso.Graph.Edges[current][next]
+		if !exists {
+			break
+		}
+
+		if distance+edge.Length > pso.Config.MaxRouteDistance {
+			break
+		}
+
+		route = append(route, next)
+		distance += edge.Length
+		current = next
+	}
+
+	return route
+}
+
+func (pso *PSO) fitness(sol Solution) float64 {
+	edgeCounts := make(map[string]int)
+	coveredEdges := make(map[string]bool)
+
+	for _, route := range sol {
+		for i := 0; i < len(route)-1; i++ {
+			from, to := route[i], route[i+1]
+			if _, exists := pso.Graph.Edges[from][to]; exists {
+				key := fmt.Sprintf("%s-%s", from, to)
+				edgeCounts[key]++
+				coveredEdges[key] = true
+			}
+		}
+	}
+
+	coverage := 0.0
+	for edge := range coveredEdges {
+		parts := strings.Split(edge, "-")
+		if edgeData, exists := pso.Graph.Edges[parts[0]][parts[1]]; exists {
+			coverage += edgeData.Length * pso.Config.CoverageFactor
+		}
+	}
+
+	penalty := 0.0
+	for edge, count := range edgeCounts {
+		if count > 3 {
+			parts := strings.Split(edge, "-")
+			if edgeData, exists := pso.Graph.Edges[parts[0]][parts[1]]; exists {
+				penalty += edgeData.Length * pso.Config.OverlapPenalty * float64(count-3)
+			}
+		}
+	}
+
+	return coverage - penalty
+}
+
+func (pso *PSO) velocityUpdate(current Solution) Solution {
+	newSol := make(Solution, len(current))
+	for i := range newSol {
+		r := rand.Float64()
+		switch {
+		case r < 0.34:
+			newSol[i] = current[i]
+		case r < 0.67:
+			if len(pso.Swarm) > 0 {
+				randomParticle := pso.Swarm[rand.Intn(len(pso.Swarm))].BestPos
+				newSol[i] = randomParticle[i]
+			}
+		default:
+			newSol[i] = pso.GlobalBest[i]
+		}
+	}
+	return newSol
+}
+
+func (pso *PSO) mutate(sol Solution) Solution {
+	mutated := make(Solution, len(sol))
+	copy(mutated, sol)
+
+	for i := range mutated {
+		if rand.Float64() < pso.Config.MutationRate && len(mutated[i]) > 3 {
+			start := rand.Intn(len(mutated[i]) - 2)
+			if start < 0 {
+				start = 0
+			}
+			end := start + 1 + rand.Intn(len(mutated[i])-start-1)
+			if end >= len(mutated[i]) {
+				end = len(mutated[i]) - 1
+			}
+
+			newSegment := pso.generateRouteSegment(mutated[i][start], mutated[i][end])
+			updatedRoute := append([]string{}, mutated[i][:start]...)
+			updatedRoute = append(updatedRoute, newSegment...)
+			if end < len(mutated[i])-1 {
+				updatedRoute = append(updatedRoute, mutated[i][end+1:]...)
+			}
+			mutated[i] = updatedRoute
+		}
+	}
+	return mutated
+}
+
+func (pso *PSO) generateRouteSegment(start, end string) Route {
+	segment := Route{start}
+	current := start
+	steps := 0
+
+	for current != end && steps < 20 {
+		neighbors := pso.Graph.Nodes[current].OutEdges
+		if len(neighbors) == 0 {
+			break
+		}
+
+		next := neighbors[rand.Intn(len(neighbors))]
+		segment = append(segment, next)
+		current = next
+		steps++
+
+		if current == end {
+			break
+		}
+	}
+
+	if current != end {
+		segment = append(segment, end)
+	}
+
+	return segment
+}
+
+func solutionToGeoJSON(graph *RoadGraph, solution Solution) *GeoJSON {
+	colors := []string{"#e6194B", "#3cb44b", "#ffe119", "#4363d8", "#f58231"}
+	features := make([]GeoJSONFeature, 0)
+
+	for vid, route := range solution {
 		if len(route) < 2 {
 			continue
 		}
 
-		// Create LineString coordinates
-		ls := orb.LineString{}
-		for _, nid := range route {
-			if node, exists := sol.Graph.Nodes[nid]; exists {
-				ls = append(ls, orb.Point{node.Lon, node.Lat})
+		var coords [][][]float64
+		for i := 0; i < len(route)-1; i++ {
+			fromNode := graph.Nodes[route[i]]
+			toNode := graph.Nodes[route[i+1]]
+			if fromNode == nil || toNode == nil {
+				continue
 			}
+			coords = append(coords, [][]float64{
+				{fromNode.X, fromNode.Y},
+				{toNode.X, toNode.Y},
+			})
 		}
 
-		// Create feature with properties
-		f := geojson.NewFeature(ls)
-		f.Properties["vehicle"] = vid + 1
-		f.Properties["stroke"] = colors[vid%len(colors)]
-		f.Properties["stroke-width"] = 3
-		f.Properties["stroke-opacity"] = 0.8
+		if len(coords) == 0 {
+			continue
+		}
 
-		features = append(features, f)
+		feature := GeoJSONFeature{
+			Type: "Feature",
+			Geometry: GeoJSONGeometry{
+				Type:        "MultiLineString",
+				Coordinates: coords,
+			},
+			Properties: map[string]interface{}{
+				"vehicle":      vid + 1,
+				"stroke":       colors[vid%len(colors)],
+				"stroke-width": 3,
+			},
+		}
+		features = append(features, feature)
 	}
 
-	fc := geojson.NewFeatureCollection(features)
-
-	data, err := json.Marshal(fc)
-	if err != nil {
-		log.Fatalf("failed to marshal geojson: %v", err)
+	return &GeoJSON{
+		Type:     "FeatureCollection",
+		Features: features,
 	}
-
-	if err := os.WriteFile(filename, data, 0644); err != nil {
-		log.Fatalf("failed to write geojson file: %v", err)
-	}
-
-	fmt.Printf("Saved optimized routes to %s\n", filename)
 }
