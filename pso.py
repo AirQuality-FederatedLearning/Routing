@@ -11,9 +11,6 @@ import time
 ox.settings.use_cache = True
 ox.settings.log_console = True
 
-random.seed(42)
-np.random.seed(42)
-
 ###############################################################################
 # 1) LOAD / CACHING THE ROAD NETWORK
 ###############################################################################

@@ -7,6 +7,7 @@ import geopandas as gpd
 from shapely.geometry import LineString
 import random
 import numpy as np
+import time
 
 # Configure OSMnx caching and logging
 ox.settings.use_cache = True
@@ -351,6 +352,7 @@ def main():
 
     # Run the algorithm only when the Run button is clicked
     if run_btn:
+        start_time = time.time()
         config = ACOConfig()
         config.num_vehicles = num_vehicles
         config.num_iterations = num_iterations
@@ -378,7 +380,8 @@ def main():
             st.session_state['aco_fit'] = best_fit
             st.session_state['graph'] = G
             st.session_state['geojson_data'] = geojson_data
-
+        end_time = time.time()
+        st.write(f"Time taken: {end_time - start_time:.2f} seconds.")
     # If a solution exists, render the map
     if "aco_solution" in st.session_state:
         G = st.session_state['graph']
@@ -420,6 +423,7 @@ def main():
 
         st.success(f"Best Fitness: {best_fit:.1f}")
         m.to_streamlit()
+
 
 if __name__ == "__main__":
     main()

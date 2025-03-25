@@ -21,7 +21,7 @@ def load_road_network(place="Coimbatore, India", cache_dir="road_cache"):
     safe_place = place.replace(" ", "_").replace(",", "")
     cache_file = os.path.join(cache_dir, f"{safe_place}_network.graphml")
     # If you have a local "major roads" file, adjust this path:
-    major_road_network = r"C:\Users\DELL\Documents\Amrita\4th year\ArcGis\major_road_cache\Coimbatore_India_major.graphml"
+    major_road_network = r"C:\Users\DELL\Documents\Amrita\4th year\ArcGis\major_road_cache\road_cache\Coimbatore_India_highways_primary.graphml"
     if os.path.exists(major_road_network):
         print(f"Loading cached road network from {major_road_network}")
         G = ox.load_graphml(major_road_network)

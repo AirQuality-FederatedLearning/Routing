@@ -2,6 +2,8 @@ github.com/MaxHalford/eaopt v0.4.2 h1:4o8MADAtpnkh7ENaEvaTjBQK35ArAmKCh8KFZvXtbS
 github.com/MaxHalford/eaopt v0.4.2/go.mod h1:cTz/IQazmJMSEllWjTzuReRUmLBR20o0C8OUoUHHuP8=
 github.com/golang/protobuf v1.5.0/go.mod h1:FsONVRAS9T7sI+LIUmWTfcYkHO4aIWwzhcaSAoJOfIk=
 github.com/google/go-cmp v0.5.5/go.mod h1:v8dTdLbMG2kIc/vJvl+f65V22dbkXbowE6jgT/gNBxE=
+github.com/gorilla/mux v1.8.1 h1:TuBL49tXwgrFYWhqrNgrUNEY92u81SPhu7sTdzQEiWY=
+github.com/gorilla/mux v1.8.1/go.mod h1:AKf9I4AEqPTmMytcMc0KkNouC66V3BtZ4qD5fmWSiMQ=
 github.com/paulmach/go.geojson v1.5.0 h1:7mhpMK89SQdHFcEGomT7/LuJhwhEgfmpWYVlVmLEdQw=
 github.com/paulmach/go.geojson v1.5.0/go.mod h1:DgdUy2rRVDDVgKqrjMe2vZAHMfhDTrjVKt3LmHIXGbU=
 github.com/qedus/osmpbf v1.2.0 h1:yRm5ECkiUsN9sA+UN9yNnm64AVW2OYhOCb+gBa1FYCU=

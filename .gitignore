@@ -10,3 +10,6 @@ solution_cache/
 cache/*
 ga_cache/*
 *.geojson
+C++/
+
+

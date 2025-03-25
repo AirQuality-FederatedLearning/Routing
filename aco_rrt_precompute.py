@@ -44,31 +44,33 @@ def load_road_network(place="Coimbatore, India", cache_dir="road_cache"):
 ###############################################################################
 # 2) FETCH POLICE STATIONS & NEAREST ROAD NETWORK NODES
 ###############################################################################
+
 def get_police_station_nodes(G, place="Coimbatore, India"):
     """
-    Fetch police stations from OSM for the given place using amenities tag.
-    For each police station geometry, find the nearest node in the road network G.
-    Return a list of valid node IDs corresponding to these stations.
+    Fetch police stations from OSM and return:
+    - Nearest road network nodes (for routing)
+    - Original police station geometries (for visualization)
     """
     try:
         gdf_police = ox.features_from_place(place, tags={"amenity": "police"})
     except Exception as e:
         st.warning(f"Could not fetch police stations: {e}")
-        return []
+        return [], None
 
     if gdf_police.empty:
-        st.info("No police stations found with the given tag. Falling back to random start nodes.")
-        return []
+        st.info("No police stations found with the given tag.")
+        return [], None
 
     station_nodes = []
-    for idx, row in gdf_police.iterrows():
-        geom = row.geometry
-        if geom is None:
-            continue
-        point = geom.centroid if geom.geom_type != 'Point' else geom
+    valid_police_gdf = gdf_police[~gdf_police.geometry.is_empty].copy()
+    valid_police_gdf['geometry'] = valid_police_gdf.geometry.centroid  # Ensure points
+
+    for idx, row in valid_police_gdf.iterrows():
+        point = row.geometry
         node_id = ox.distance.nearest_nodes(G, point.x, point.y)
         station_nodes.append(node_id)
-    return list(set(station_nodes))
+    
+    return list(set(station_nodes)), valid_police_gdf
 
 ###############################################################################
 # 3) SIMPLE RRT-STYLE PRECOMPUTED SOLUTIONS
@@ -174,7 +176,9 @@ class RRTACOOptimizer:
     def __init__(self, G, config, station_nodes=None):
         self.G = G
         self.config = config
-        self.station_nodes = station_nodes if station_nodes else []
+        self.station_nodes = station_nodes.copy() if station_nodes else []
+        self.current_station_index = 0  # Track the current index for round-robin selection
+
 
         self.edge_length_cache = {}
         self.adjacency_cache = {}
@@ -198,29 +202,25 @@ class RRTACOOptimizer:
 
         self.best_solution = None
         self.best_fitness = -float('inf')
+        
 
     def build_ant_route(self):
         """
-        Build a single route (for one ant = one vehicle) similarly 
-        to RRT expansions, but we incorporate ACO-style edge choice 
-        if we do step-by-step. 
-        However, let's keep it simpler for demonstration:
-          - Start random node
-          - at each step, pick random node in entire graph
-            with probability ~ pheromone^alpha * (1/dist)^beta,
-            then shortest_path to it,
-          - stop if route distance > max_route_distance
+        Build a single route (for one ant = one vehicle) incorporating ACO-style edge choice.
+        Starts from police station nodes in a round-robin fashion if available.
         """
         nodes_list = list(self.G.nodes())
         if not nodes_list:
             return []
 
-        # If police stations are provided, use them as the starting nodes for vehicles
+        # Choose starting node: police station (if available) in round-robin, else random
         if self.station_nodes:
-            current = self.station_nodes.pop(0)  # Start with the first police station node
+            current_idx = self.current_station_index % len(self.station_nodes)
+            current = self.station_nodes[current_idx]
+            self.current_station_index += 1  # Move to next station for the next ant
         else:
-            current = random.choice(nodes_list)  # Fall back to a random node if no stations available
-        
+            current = random.choice(nodes_list)
+
         route = [current]
         dist_so_far = 0.0
 
@@ -417,9 +417,10 @@ def solution_to_geojson(G, solution):
 ###############################################################################
 # 6) STREAMLIT MAIN APP
 ###############################################################################
+
 def main():
     st.set_page_config(layout="wide")
-    st.title("ACO with RRT* Precomputation (Seeding Pheromones)")
+    st.title("ACO Patrol Route Optimization with Police Station Starting Points")
 
     with st.sidebar:
         num_vehicles = st.slider("Number of Vehicles (Ants)", 2, 50, 50)
@@ -429,11 +430,12 @@ def main():
         max_route_distance = st.slider("Max Route Distance", 5000, 50000, 15000, step=5000)
         max_route_steps = st.slider("Max Route Steps", 5, 50, 20)
         num_precomputed = st.slider("Num RRT Solutions to Generate", 1, 10, 3)
-        run_btn = st.button("Run ACO")
+        run_btn = st.button("Run Optimization")
 
     if run_btn:
         start_time = time.time()
-        # 1) Build config
+        
+        # 1) Initialize configuration
         config = ACOConfig()
         config.num_ants = num_vehicles
         config.num_iterations = num_iterations
@@ -443,12 +445,20 @@ def main():
         config.max_route_steps = max_route_steps
         config.num_precomputed_solutions = num_precomputed
 
-        # 2) Load graph
-        with st.spinner("Loading road network..."):
+        # 2) Load road network
+        with st.spinner("Loading Coimbatore road network..."):
             G = load_road_network("Coimbatore, India")
 
-        # 3) Generate precomputed solutions via RRT
-        with st.spinner("Generating RRT expansions..."):
+        # 3) Get police stations
+        with st.spinner("Identifying police stations..."):
+            station_nodes, police_gdf = get_police_station_nodes(G, "Coimbatore, India")
+            if police_gdf is not None:
+                st.success(f"Found {len(police_gdf)} police stations")
+            else:
+                st.warning("No police stations found - using random starting points")
+
+        # 4) Generate RRT solutions
+        with st.spinner("Generating initial solutions with RRT..."):
             precomputed_solutions = generate_precomputed_solutions(
                 G=G,
                 how_many=config.num_precomputed_solutions,
@@ -457,33 +467,80 @@ def main():
                 max_route_steps=config.max_route_steps
             )
 
-        # 4) Initialize and run ACO
-        with st.spinner("Running ACO with seeded pheromones..."):
-            station_nodes = get_police_station_nodes(G, "Coimbatore, India")
+        # 5) Run ACO optimization
+        with st.spinner("Optimizing patrol routes..."):
             optimizer = RRTACOOptimizer(G, config, station_nodes)
             best_sol, best_fit, fitness_progress = optimizer.run(precomputed_solutions)
 
-        # Plot fitness progress
-        plt.plot(fitness_progress)
-        plt.xlabel('Iteration')
-        plt.ylabel('Fitness')
-        plt.title('ACO Fitness Progress')
-        st.pyplot(plt)
+        # 6) Visualize results
+        st.subheader("Optimization Results")
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            # Create Leafmap visualization
+            m = leafmap.Map(center=[11.0168, 76.9558], zoom=12, height=600)
+            
+            # Add subtle boundary
+            boundary_gdf = ox.geocode_to_gdf("Coimbatore, India")
+            m.add_gdf(
+                boundary_gdf,
+                layer_name="City Boundary",
+                style={
+                    "color": "#444444",
+                    "fillOpacity": 0.05,
+                    "weight": 1,
+                    "dashArray": "2,2"
+                }
+            )
 
-        # 5) Convert best solution to GeoJSON and plot
-        geojson_data = solution_to_geojson(G, best_sol)
+            # Add police stations
+            if police_gdf is not None:
+                police_geojson = ox.io._geometries_to_geojson(police_gdf)
+                m.add_geojson(
+                    police_geojson,
+                    layer_name="Police Stations",
+                    style={
+                        "color": "#0044FF",
+                        "markerSize": 10,
+                        "markerSymbol": "police",
+                        "fillOpacity": 0.8
+                    }
+                )
 
-        m = leafmap.Map(center=[11.0168, 76.9558], zoom=12)
-        # optional boundary
-        boundary_gdf = ox.geocode_to_gdf("Coimbatore, India")
-        m.add_gdf(boundary_gdf, layer_name="Coimbatore Boundary",
-                  style={"color": "#FF0000", "fillOpacity": 0.1})
-        m.add_geojson(geojson_data, layer_name="ACO-RRT Hybrid Routes")
+            # Add optimized routes
+            route_geojson = solution_to_geojson(G, best_sol)
+            m.add_geojson(
+                route_geojson,
+                layer_name="Patrol Routes",
+                style={"stroke-width": 2}
+            )
 
-        st.success(f"Best Fitness: {best_fit:.2f}")
-        m.to_streamlit()
-        end_time = time.time()
-        st.write(f"Execution took {end_time - start_time:.2f} seconds.")
+            # Add layer control
+            m.add_layer_control(position="topright")
+            
+            # Display map
+            st.write("### Patrol Route Visualization")
+            m.to_streamlit()
+
+        with col2:
+            # Show fitness progress
+            st.write("### Optimization Progress")
+            plt.figure(figsize=(8, 4))
+            plt.plot(fitness_progress, color="#00aa00")
+            plt.xlabel("Iteration")
+            plt.ylabel("Fitness Score")
+            plt.grid(alpha=0.3)
+            st.pyplot(plt)
+
+            # Display metrics
+            st.write("### Key Metrics")
+            st.metric("Best Fitness Score", f"{best_fit:,.2f}")
+            st.metric("Total Route Distance", 
+                     f"{(sum(len(r) for r in best_sol)/1000):.1f} km")
+            st.metric("Computation Time", 
+                     f"{(time.time() - start_time):.2f} seconds")
 
 if __name__ == "__main__":
     main()
+    
+    
