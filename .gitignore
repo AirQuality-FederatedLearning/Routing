@@ -13,3 +13,5 @@ ga_cache/*
 C++/
 
 
+*.graphml
+*.pbf
