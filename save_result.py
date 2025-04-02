@@ -251,7 +251,7 @@ def main():
     
     with st.sidebar:
         st.header("Optimization Parameters")
-        num_vehicles = st.slider("Number of Vehicles", 3, 10, 5)
+        num_vehicles = st.slider("Number of Vehicles", 3, 50, 50)
         population_size = st.slider("Population Size", 10, 100, 50)
         num_generations = st.slider("Generations", 10, 200, 50)
         mutation_rate = st.slider("Mutation Rate", 0.0, 1.0, 0.2)

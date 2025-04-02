@@ -93,33 +93,27 @@ class PSOConfig:
         self.max_route_distance = 15000  # if you want to limit route length
         self.mutation_rate = 0.2         # chance to mutate a route
 
-###############################################################################
-# 4) PSO OPTIMIZER (ROUTE-BASED)
-###############################################################################
+
 class PSORouteOptimizer:
     def __init__(self, G, config, start_nodes=None):
         self.G = G
         self.config = config
         self.start_nodes = start_nodes
 
-        # Build adjacency + edge length caches
         self.adjacency_cache = {}
         self.edge_length_cache = {}
 
         for node in self.G.nodes():
-            # For a directed graph, successors might differ from neighbors
             self.adjacency_cache[node] = list(self.G.successors(node))
 
         for u, v, data in self.G.edges(data=True):
             length = data.get('length', 0)
             self.edge_length_cache[(u, v)] = length
 
-        # For coverage tracking
         self.all_edges = set(self.edge_length_cache.keys())
 
-        # Swarm structures
-        self.swarm = []               # current solutions
-        self.personal_best = []       # personal best solutions
+        self.swarm = []               
+        self.personal_best = []       
         self.personal_best_fitness = []
         self.global_best = None
         self.global_best_fitness = -float('inf')
